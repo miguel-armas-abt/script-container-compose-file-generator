@@ -4,24 +4,39 @@ set -e
 source ./commons.sh
 source ./../variables.env
 
+get_compose_list() {
+  local values_file=$1
+  local yq_path=$2
+
+  "$YQ" "$yq_path // [] | .[]" "$values_file" 2>/dev/null || true
+}
+
+build_array_block() {
+  local header=$1
+  local indent=$2
+  local list="$3"
+
+  if [ -z "$list" ]; then
+    return
+  fi
+
+  local result="${header}:\n"
+
+  while IFS= read -r item; do
+    [ -z "$item" ] && continue
+    result+="${indent}- $item\n"
+  done <<< "$list"
+
+  echo -e "$result"
+}
+
 build_dependencies() {
   local values_file=$1
 
   local deps_list
-  deps_list=$("$YQ" '.container.compose.dependencies // [] | .[]' "$values_file" 2>/dev/null || true)
+  deps_list=$(get_compose_list "$values_file" '.container.compose.dependencies')
 
-  if [ -z "$deps_list" ]; then
-    return
-  fi
-
-  local result="depends_on:\n"
-
-  while IFS= read -r dep; do
-    [ -z "$dep" ] && continue
-    result+="      - $dep\n"
-  done <<< "$deps_list"
-
-  echo -e "$result"
+  build_array_block "depends_on" "      " "$deps_list"
 }
 
 build_variables() {
@@ -48,20 +63,9 @@ build_volumes() {
   local values_file=$1
 
   local volumes_list
-  volumes_list=$("$YQ" '.container.compose.volumes // [] | .[]' "$values_file" 2>/dev/null || true)
+  volumes_list=$(get_compose_list "$values_file" '.container.compose.volumes')
 
-  if [ -z "$volumes_list" ]; then
-    return
-  fi
-
-  local result="volumes:\n"
-
-  while IFS= read -r vol; do
-    [ -z "$vol" ] && continue
-    result+="      - $vol\n"
-  done <<< "$volumes_list"
-
-  echo -e "$result"
+  build_array_block "volumes" "      " "$volumes_list"
 }
 
 process_csv_record() {
@@ -164,7 +168,7 @@ build_top_level_volumes() {
     fi
 
     local volumes_list
-    volumes_list=$("$YQ" '.container.compose.volumes // [] | .[]' "$values_file" 2>/dev/null || true)
+    volumes_list=$(get_compose_list "$values_file" '.container.compose.volumes')
 
     [ -z "$volumes_list" ] && continue
 
@@ -173,7 +177,7 @@ build_top_level_volumes() {
 
       local source="${vol%%:*}"
 
-      # Binds mounts
+      # Bind mounts
       if [[ "$source" == /* || "$source" == .* || "$source" == ../* ]]; then
         continue
       fi
