@@ -34,12 +34,23 @@ build_variables() {
 }
 
 build_volumes() {
-  local volumes=$1
+  local values_file=$1
 
-  if [ "$volumes" != "none" ]; then
-    formatted_volumes=$(echo "$volumes" | awk -F';' '{for(i=1;i<=NF;i++) printf "      - %s\n", $i}')
-    echo -e "volumes:\n$formatted_volumes"
+  local volumes_list
+  volumes_list=$("$YQ" '.container.compose.volumes // [] | .[]' "$values_file" 2>/dev/null || true)
+
+  if [ -z "$volumes_list" ]; then
+    return
   fi
+
+  local result="volumes:\n"
+
+  while IFS= read -r vol; do
+    [ -z "$vol" ] && continue
+    result+="      - $vol\n"
+  done <<< "$volumes_list"
+
+  echo -e "$result"
 }
 
 process_csv_record() {
@@ -63,7 +74,6 @@ process_csv_record() {
 
   host_port=$("$YQ" '.container.compose.host-port' "$values_file")
   dependencies=$("$YQ" '.container.compose.dependencies // "none"' "$values_file")
-  volumes=$("$YQ" '.container.compose.volumes // "none"' "$values_file")
 
   formatted_service=$(<"$SERVICE_TEMPLATE")
   formatted_service="${formatted_service//@project_path/$project_path}"
@@ -82,8 +92,12 @@ process_csv_record() {
     formatted_service="${formatted_service//@variables/""}"
   fi
 
-  volumes=$(build_volumes "$volumes")
-  formatted_service="${formatted_service//@volumes/$volumes}"
+  volumes_section=$(build_volumes "$values_file")
+  if [ -n "$volumes_section" ]; then
+    formatted_service="${formatted_service//@volumes/$volumes_section}"
+  else
+    formatted_service="${formatted_service//@volumes/""}"
+  fi
 
   template_accumulator+="$formatted_service\n\n"
 
@@ -111,11 +125,78 @@ iterate_csv_records() {
   echo "$template_accumulator"
 }
 
+build_top_level_volumes() {
+  local all_sources=""
+  local firstline=true
+
+  while IFS=',' read -r project_name absolute_path || [ -n "$project_name" ]; do
+    # Ignore headers
+    if $firstline; then
+      firstline=false
+      continue
+    fi
+
+    # Ignore comments and parents
+    if [[ $project_name == "#"* ]]; then
+      continue
+    fi
+
+    local project_path="$absolute_path/$project_name"
+    local values_file="$project_path/$DEFAULT_VALUES_FILE"
+
+    if [[ ! -f "$values_file" ]]; then
+      continue
+    fi
+
+    local volumes_list
+    volumes_list=$("$YQ" '.container.compose.volumes // [] | .[]' "$values_file" 2>/dev/null || true)
+
+    [ -z "$volumes_list" ] && continue
+
+    while IFS= read -r vol; do
+      [ -z "$vol" ] && continue
+
+      local source="${vol%%:*}"
+
+      # Binds mounts
+      if [[ "$source" == /* || "$source" == .* || "$source" == ../* ]]; then
+        continue
+      fi
+
+      # no duplicates
+      if ! grep -q "^$source$" <<< "$all_sources"; then
+        all_sources+="$source\n"
+      fi
+    done <<< "$volumes_list"
+
+  done < <(sed 's/\r//g' "$PROJECTS_CSV")
+
+  if [ -z "$all_sources" ]; then
+    return
+  fi
+
+  local result="volumes:\n"
+  while IFS= read -r src; do
+    [ -z "$src" ] && continue
+    result+="  $src:\n"
+  done <<< "$(echo -e "$all_sources")"
+
+  echo -e "$result"
+}
+
 build_compose_file() {
   compose_template=$(<"$COMPOSE_TEMPLATE")
   services=$(iterate_csv_records)
   compose_template="${compose_template//@services/$services}"
-  compose_template=$(echo "$compose_template" | sed '/^[[:space:]]*$/d') #delete empty lines
+
+  top_level_volumes=$(build_top_level_volumes)
+  if [ -n "$top_level_volumes" ]; then
+    compose_template="${compose_template//@top_level_volumes/$top_level_volumes}"
+  else
+    compose_template="${compose_template//@top_level_volumes/""}"
+  fi
+
+  compose_template=$(echo "$compose_template" | sed '/^[[:space:]]*$/d') # delete empty lines
 
   echo -e "$compose_template" > "$COMPOSE_FILE"
   echo -e "${CHECK_SYMBOL} created: $COMPOSE_FILE"

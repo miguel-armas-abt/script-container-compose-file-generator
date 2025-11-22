@@ -1,5 +1,6 @@
 services:
 @services
+@top_level_volumes
 networks:
   common-network:
     driver: bridge
