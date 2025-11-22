@@ -17,16 +17,16 @@ build_variables() {
   local values_file=$1
   local result=""
 
-  configMaps=$(yq '.configMaps // {}' "$values_file")
-  secrets=$(yq '.secrets // {}' "$values_file")
+  configMaps=$("$YQ" '.container.variables.config-map // {}' "$values_file")
+  secrets=$("$YQ" '.container.variables.secrets // {}' "$values_file")
 
-  for key in $(echo "$configMaps" | yq 'keys | .[]'); do
-    value=$(echo "$configMaps" | yq ".\"$key\"")
+  for key in $(echo "$configMaps" | "$YQ" 'keys | .[]'); do
+    value=$(echo "$configMaps" | "$YQ" ".\"$key\"")
     result+="      - $(echo "$key" | tr '-' '_' | tr '[:lower:]' '[:upper:]')=$value\n"
   done
 
-  for key in $(echo "$secrets" | yq 'keys | .[]'); do
-    value=$(echo "$secrets" | yq ".\"$key\"")
+  for key in $(echo "$secrets" | "$YQ" 'keys | .[]'); do
+    value=$(echo "$secrets" | "$YQ" ".\"$key\"")
     result+="      - $(echo "$key" | tr '-' '_' | tr '[:lower:]' '[:upper:]')=$value\n"
   done
 
@@ -44,23 +44,30 @@ build_volumes() {
 
 process_csv_record() {
   local template_accumulator=$1
-  local component_name=$2
-  local component_type=$3
+  local project_name=$2
+  local absolute_path=$3
 
-  component_path="$BACKEND_PATH/$component_type/$component_name"
-  values_file="$component_path/values.yaml"
+  project_path="$absolute_path/$project_name"
+  values_file="$project_path/$DEFAULT_VALUES_FILE"
 
-  repository=$(yq '.container.image.repository' "$values_file")
-  tag_version=$(yq '.container.image.tag' "$values_file")
+  if [[ ! -f "$values_file" ]]; then
+    print_log "$RED $values_file not found. $NC"
+    exit 1
+  fi
+
+  repository=$("$YQ" '.container.image.repository' "$values_file")
+  tag_version=$("$YQ" '.container.image.tag' "$values_file")
+  container_port=$("$YQ" '.container.port' "$values_file")
+
   docker_image="$repository:$tag_version"
-  host_port=$(yq '.docker.hostPort' "$values_file")
-  container_port=$(yq '.container.port' "$values_file")
-  dependencies=$(yq '.docker.dependencies // "none"' "$values_file")
-  volumes=$(yq '.docker.volumes // "none"' "$values_file")
+
+  host_port=$("$YQ" '.container.compose.host-port' "$values_file")
+  dependencies=$("$YQ" '.container.compose.dependencies // "none"' "$values_file")
+  volumes=$("$YQ" '.container.compose.volumes // "none"' "$values_file")
 
   formatted_service=$(<"$SERVICE_TEMPLATE")
-  formatted_service="${formatted_service//@component_path/$component_path}"
-  formatted_service="${formatted_service//@app_name/$component_name}"
+  formatted_service="${formatted_service//@project_path/$project_path}"
+  formatted_service="${formatted_service//@app_name/$project_name}"
   formatted_service="${formatted_service//@docker_image/$docker_image}"
   formatted_service="${formatted_service//@host_port/$host_port}"
   formatted_service="${formatted_service//@container_port/$container_port}"
@@ -79,6 +86,8 @@ process_csv_record() {
   formatted_service="${formatted_service//@volumes/$volumes}"
 
   template_accumulator+="$formatted_service\n\n"
+
+  print_log "$project_name"
   echo "$template_accumulator"
 }
 
@@ -86,7 +95,7 @@ iterate_csv_records() {
   local template_accumulator=""
 
   firstline=true
-  while IFS=',' read -r component_name component_type || [ -n "$component_name" ]; do
+  while IFS=',' read -r project_name absolute_path || [ -n "$project_name" ]; do
     # Ignore headers
     if $firstline; then
         firstline=false
@@ -94,22 +103,22 @@ iterate_csv_records() {
     fi
 
     # Ignore comments and parents
-    if [[ $component_name != "#"* ]] && [[ $component_type != "$PARENT_TYPE" ]]; then
-      template_accumulator=$(process_csv_record "$template_accumulator" "$component_name" "$component_type")
+    if [[ $project_name != "#"* ]]; then
+      template_accumulator=$(process_csv_record "$template_accumulator" "$project_name" "$absolute_path")
     fi
 
-  done < <(sed 's/\r//g' "$COMPONENTS_CSV")
+  done < <(sed 's/\r//g' "$PROJECTS_CSV")
   echo "$template_accumulator"
 }
 
 build_compose_file() {
-  compose_template=$(<"$DOCKER_COMPOSE_TEMPLATE")
+  compose_template=$(<"$COMPOSE_TEMPLATE")
   services=$(iterate_csv_records)
   compose_template="${compose_template//@services/$services}"
   compose_template=$(echo "$compose_template" | sed '/^[[:space:]]*$/d') #delete empty lines
 
-  echo -e "$compose_template" > "$DOCKER_COMPOSE_FILE"
-  echo -e "${CHECK_SYMBOL} created: $DOCKER_COMPOSE_FILE"
+  echo -e "$compose_template" > "$COMPOSE_FILE"
+  echo -e "${CHECK_SYMBOL} created: $COMPOSE_FILE"
 }
 
 build_compose_file
