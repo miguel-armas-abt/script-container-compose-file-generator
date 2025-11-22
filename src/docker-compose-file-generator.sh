@@ -5,12 +5,23 @@ source ./commons.sh
 source ./../variables.env
 
 build_dependencies() {
-  local dependencies=$1
+  local values_file=$1
 
-  if [ "$dependencies" != "none" ]; then
-    formatted_dependencies=$(echo "$dependencies" | awk -F';' '{for(i=1;i<=NF;i++) printf "      - %s\n", $i}')
-    echo -e "depends_on:\n$formatted_dependencies"
+  local deps_list
+  deps_list=$("$YQ" '.container.compose.dependencies // [] | .[]' "$values_file" 2>/dev/null || true)
+
+  if [ -z "$deps_list" ]; then
+    return
   fi
+
+  local result="depends_on:\n"
+
+  while IFS= read -r dep; do
+    [ -z "$dep" ] && continue
+    result+="      - $dep\n"
+  done <<< "$deps_list"
+
+  echo -e "$result"
 }
 
 build_variables() {
@@ -73,7 +84,6 @@ process_csv_record() {
   docker_image="$repository:$tag_version"
 
   host_port=$("$YQ" '.container.compose.host-port' "$values_file")
-  dependencies=$("$YQ" '.container.compose.dependencies // "none"' "$values_file")
 
   formatted_service=$(<"$SERVICE_TEMPLATE")
   formatted_service="${formatted_service//@project_path/$project_path}"
@@ -82,8 +92,13 @@ process_csv_record() {
   formatted_service="${formatted_service//@host_port/$host_port}"
   formatted_service="${formatted_service//@container_port/$container_port}"
 
-  dependencies=$(build_dependencies "$dependencies")
-  formatted_service="${formatted_service//@dependencies/$dependencies}"
+  # dependencies como array
+  dependencies_section=$(build_dependencies "$values_file")
+  if [ -n "$dependencies_section" ]; then
+    formatted_service="${formatted_service//@dependencies/$dependencies_section}"
+  else
+    formatted_service="${formatted_service//@dependencies/""}"
+  fi
 
   variables=$(build_variables "$values_file")
   if [ -n "$variables" ]; then
